@@ -4,5 +4,4 @@ This repository includes notebooks utilized to produce results for the publicati
 
 * Standard workflow (adapted from besca 2.4, based on scanpy)
 * Cell annotation workflow (adapted from besca 2.4, based on scanpy, including exploratory analyses related to signature and marker gene expression
-TCR analysis workflor (adapted from scirpy)
 * Underlying data can be retrieved from ArrayExpress, E-MTAB-XXXX
