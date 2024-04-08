@@ -1,0 +1,442 @@
+---
+output:
+  html_document:
+    theme: spacelab
+    mathjax: default
+    code_folding: hide
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 3
+editor_options: 
+  chunk_output_type: console
+params:
+  echo: yes
+  relative: FALSE
+title: "Differential abundance analysis Melanoma"
+author: "Petra Schwalie and Juliane Siebourg"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = T, echo = params$echo, results = 'asis', 
+                      message = F, warning = F, error = T,
+                      width = 120)
+# dev = 'pdf',fig.width=12, fig.height=8, out.width='1200'  
+
+env <- Sys.info()["sysname"]
+```
+
+
+```{r settings, include=FALSE}
+require(RColorBrewer)
+require(knitr)
+require(ggthemes)
+require(viridis)
+
+library(SingleCellExperiment)
+library(lme4)
+library(MAST)
+library(DT)
+
+library(tidyverse)
+
+# change ggplot theme
+theme_set(theme_bw())
+
+# To store analyis results
+dir.create('results')
+
+detach("package:dplyr", character.only = TRUE)
+library("dplyr", character.only = TRUE)
+
+```
+
+# Load the Data
+
+TIL data is loaded. Comparison at celltype3 and celltype2 level, NR (adjuvant only) vs. R (TF only); 
+change selection for NR (nadj) vs. R for non-adjuvant analysis. Cell numbers are used as weights. 
+Accounting only for gender.  Patients 38 and 12 were removed from the analysis. 
+
+Overview of cell numbers per patient and cell type (lev1):
+
+```{r}
+mymat <- readr::read_tsv('../analyzed/sw_besca2_immune_fullMeta_res2.tsv')
+
+mymat=mymat[,c(1:40,179,145:208)]
+colnames(mymat)=make.names(colnames(mymat))
+mymat=mymat[,which(!duplicated(colnames(mymat)))]
+
+mymat <- mymat %>%
+  mutate(cell_names=celltype3_pub)  %>%
+  mutate(sscell_group=celltype2_pub) %>%
+  mutate(cell_group=celltype1) %>%
+  mutate(Lesion = replace(Lesion, Lesion == "Brain", "Other")) %>%
+  mutate(Lesion = replace(Lesion, Lesion == "Subc", "Other")) %>%
+  mutate(Lesion = replace(Lesion, Lesion == "Sinon", "Other")) %>%
+  mutate(Lesion = replace(Lesion, Lesion == "Lung", "Other")) 
+    
+mymat=mymat[mymat$RCat%in%c("R","NR_nadj"),]
+
+mymat_summary <- mymat %>% select(PatientID, experiment, Response, Respond,Lesion,Gender,Age,cell_names, sscell_group, cell_group, Sample.type, score_ProlifMyeloid_scanpy) %>% 
+  group_by(PatientID, Gender,Age,Lesion, cell_names, sscell_group,Respond, Sample.type, cell_group, Response) %>% 
+  summarize(mean = mean(score_ProlifMyeloid_scanpy, na.rm = TRUE), 
+            median = median(score_ProlifMyeloid_scanpy, na.rm = TRUE), 
+            sd = sd(score_ProlifMyeloid_scanpy, na.rm = TRUE), 
+            iqr = IQR(score_ProlifMyeloid_scanpy, na.rm = TRUE),
+            count = n()) %>% 
+  group_by(PatientID,Respond) %>% 
+  mutate(total_count = sum(count),
+         freq = count/total_count) %>% 
+  ungroup() %>% 
+  mutate(sample_id = interaction(PatientID, cell_names)) %>% 
+  mutate(sample_type = factor(Respond, levels = c('PD', 'R')))
+
+mymat_summary <- mymat_summary %>%
+  mutate(PatientID=as.character(PatientID))
+
+chosenid=colnames(mymat_summary)[which(!colnames(mymat_summary)%in%c("mean","median","sd","iqr","MyTcFreq","total_MyTc","cDCMyFreq"      ,"total_cDCMy", "TcEMvsEx","total_TcEMvsEx","cDC12Freq","total_cDC12"))]
+datatable(mymat_summary[,chosenid])
+
+```
+
+Overview of cell numbers per patient and cell type (lev2):
+
+```{r}
+# summary of only high level celltypes
+#  dplyr::filter(celltype != 'AI10 dominated mixture') %>% 
+mymat_hl_summary <- mymat %>% 
+  select(PatientID, sscell_group, cell_group, experiment, Response, Respond,Lesion,Gender,Age, score_ProlifMyeloid_scanpy) %>% 
+  group_by(PatientID, sscell_group, cell_group,Lesion,Gender,Age,Respond, Response) %>% 
+  summarize(mean = mean(score_ProlifMyeloid_scanpy, na.rm = TRUE), 
+            median = median(score_ProlifMyeloid_scanpy, na.rm = TRUE), 
+            sd = sd(score_ProlifMyeloid_scanpy, na.rm = TRUE), 
+            iqr = IQR(score_ProlifMyeloid_scanpy, na.rm = TRUE),
+            count = n()) %>% 
+  group_by(PatientID, Respond) %>% 
+  mutate(total_count = sum(count),
+         freq = count/total_count) %>% 
+  ungroup() %>% 
+  mutate(sample_id = interaction(PatientID, sscell_group)) %>% 
+  mutate(sample_type = factor(Respond, levels = c('PD', 'R')))
+
+mymat_hl_summary <- mymat_hl_summary %>%
+  mutate(PatientID=as.character(PatientID))
+
+col_tissue <- c(PD = 'cornflowerblue', R = 'orange')
+
+chosenid=colnames(mymat_hl_summary)[which(!colnames(mymat_hl_summary)%in%c("mean","median","sd","iqr","MyTcFreq","total_MyTc","cDCMyFreq" ,"total_cDCMy", "TcEMvsEx","total_TcEMvsEx","cDC12Freq","total_cDC12"))]
+datatable(mymat_hl_summary[,chosenid])
+
+```
+
+
+Available cell types:
+
+```{r}
+mymat_summary %>% select(cell_names, sscell_group, cell_group) %>% 
+  unique() %>% datatable()
+
+```
+
+# Population counts and fractions
+
+## Visualization per celltype and tissue 
+
+### Total cell counts {.tabset .tabset-pills}
+
+```{r, fig.width=4, fig.height=4}
+ggplot(mymat_summary, aes(x = sample_type, y = total_count)) +
+  geom_boxplot(color = 'gray') +
+  geom_point(aes(color = PatientID, shape = sample_type)) +
+  geom_line(aes(group = PatientID), color = 'darkgray') +
+  scale_color_viridis_d()
+```
+
+Responders have overall higher cell numbers. 
+
+### Cell counts by cell type {-}
+
+```{r, fig.width=7, fig.height=5}
+ggplot(mymat_hl_summary, aes(x = sample_type, y = count, 
+                         color = PatientID, shape = sample_type)) +
+  geom_point() +
+  geom_line(aes(group = PatientID), color = 'darkgray') +
+  facet_wrap(~sscell_group, scale = 'free_y') +
+  scale_color_viridis_d()
+```
+
+```{r, fig.width=9, fig.height=9}
+ggplot(mymat_summary, aes(x = sample_type, y = count, 
+                         color = PatientID, shape = sample_type)) +
+  geom_point() +
+  geom_line(aes(group = PatientID), color = 'darkgray') +
+  facet_wrap(~cell_names, scale = 'free_y') +
+  scale_color_viridis_d()
+```
+
+### Cell fractions by cell type {-}
+
+```{r, fig.width=7, fig.height=5}
+ggplot(mymat_hl_summary, aes(x = sample_type, y = freq, 
+                         color = PatientID, shape = sample_type)) +
+  geom_point() +
+  geom_line(aes(group = PatientID), color = 'darkgray') +
+  facet_wrap(~sscell_group, scale = 'free_y') +
+  scale_color_viridis_d()
+```
+
+```{r, fig.width=9, fig.height=9}
+ggplot(mymat_summary, aes(x = sample_type, y = freq, 
+                         color = PatientID, shape = sample_type)) +
+  geom_point() +
+  geom_line(aes(group = PatientID), color = 'darkgray') +
+  facet_wrap(~cell_names, scale = 'free_y') +
+  scale_color_viridis_d()
+```
+
+
+## Modeling population sizes
+
+### GLMM
+
+```{r, include=FALSE}
+
+# wrapper function from Malgorzata 2017... 
+differential_abundance_wrapper <- function(counts, md, formula, K){
+  ## Fit the GLMM for each cluster separately
+  ntot <- colSums(counts)
+  fit_binomial <- lapply(1:nrow(counts), function(i){
+
+    data_tmp <- data.frame(y = as.numeric(counts[i, md$sample_id]),
+      total = ntot[md$sample_id], md)
+
+    fit_tmp <- glmer(formula, weights = total, family = binomial,
+      data = data_tmp)
+
+    ## Fit contrasts one by one
+    out <- apply(K, 1, function(k){
+      contr_tmp <- glht(fit_tmp, linfct = matrix(k, 1))
+      summ_tmp <- summary(contr_tmp)
+      pval <- summ_tmp$test$pvalues
+      return(pval)
+    })
+     return(out)
+  })
+  pvals <- do.call(rbind, fit_binomial)
+  colnames(pvals) <- paste0("pval_", contrast_names)
+  rownames(pvals) <- rownames(counts)
+  ## Adjust the p-values
+  adjp <- apply(pvals, 2, p.adjust, method = "BH")
+  colnames(adjp) <- paste0("adjp_", contrast_names)
+  return(list(pvals = pvals, adjp = adjp))
+}
+
+```
+
+#### Patient as random effect
+
+##### all celltypes
+
+```{r}
+
+avail <- unique(mymat_summary %>% select(cell_names, count) %>%   
+                  group_by(cell_names) %>% 
+                  summarise(count = mean(count))%>% dplyr::filter(count>20)  %>% .$cell_names)
+
+ 
+```
+
+
+
+```{r}
+glme_res <- mymat_summary %>% 
+  dplyr::filter(cell_names %in% avail) %>% 
+  group_by(cell_names) %>% nest() %>% 
+  mutate(fit = map(data, ~lme4::glmer(count/total_count ~ sample_type +(1 | PatientID), # 
+                        weights = total_count, # weight by number of observation to prioritize patients with high counts?
+                        family = 'binomial', 
+                        data = .x)),
+         #summ = map(fit, ~summary() %>% broom::tidy()),
+         res = map(fit, ~multcomp::glht(.x) %>% summary() %>% broom::tidy()),
+         ci =  map(fit, ~multcomp::glht(.x) %>% confint() %>% broom::tidy())
+  ) #
+
+res <- glme_res$res
+names(res) <- glme_res$cell_names
+
+toexcl=res[[1]]$contrast[which(!res[[1]]$contrast%in%c("sample_typeR","sample_typeNR","sample_typeTF"))]
+res <- res %>% bind_rows(.id = 'cell_names') %>% 
+  dplyr::filter(!contrast %in% toexcl) 
+
+  
+ci <- glme_res$ci
+names(ci) <- glme_res$cell_names
+ci <- ci %>% bind_rows(.id = 'cell_names') %>% 
+  dplyr::filter(!contrast %in% toexcl) %>% 
+  select(-contrast, -estimate)
+
+
+res <- res %>% 
+  full_join(ci) %>% 
+  arrange(adj.p.value) %>% 
+  mutate(cell_names = factor(cell_names, levels = (res$cell_names)),
+         odds_ratio = exp(estimate),
+         ci_odds_low = exp(conf.low), 
+         ci_odds_high = exp(conf.high))
+         #prob = odds / (1 + odds)) 
+
+res$cell_names <- factor(res$cell_names, levels = rev(res$cell_names))
+ 
+```
+
+Estimated difference with confidence intervals, ordered by significance.
+
+```{r, fig.width=4, fig.height=5}
+
+ggplot(res, aes(x = estimate, y = cell_names)) +
+  geom_vline(xintercept = 0, color = 'gray', linetype = 'dashed') +
+  geom_point() +
+  geom_errorbarh(aes(xmax = conf.high, xmin = conf.low), height = .1) +
+  ggtitle('logOdds ratio')
+
+
+```
+
+Results table 
+
+```{r}
+res %>% 
+  mutate(adj.p.value = format(adj.p.value, digits = 2)) %>% 
+  kable(digits = 2) %>% 
+  kableExtra::kable_styling(full_width = FALSE)
+
+```
+
+
+##### higher level celltypes
+
+```{r}
+
+avai2 <- unique(mymat_hl_summary %>% select(sscell_group, count) %>%   
+                  group_by(sscell_group) %>% 
+                  summarise(count = mean(count))%>% dplyr::filter(count>20)  %>% .$sscell_group)
+
+```
+
+
+
+```{r}
+#Lesion+
+glme_res <- mymat_hl_summary %>% 
+  dplyr::filter(sscell_group %in% avai2) %>% 
+  group_by(sscell_group) %>% nest() %>% 
+  mutate(fit = map(data, ~lme4::glmer(count/total_count ~ sample_type+(1 | PatientID), 
+                        weights = total_count, # weight by number of observation to prioritize patients with high counts?
+                        family = 'binomial', 
+                        data = .x)),
+         res = map(fit, ~multcomp::glht(.x) %>% summary() %>% broom::tidy()),
+         ci =  map(fit, ~multcomp::glht(.x) %>% confint() %>% broom::tidy())
+  )
+
+
+res_hl <- glme_res$res
+names(res_hl) <- glme_res$sscell_group
+
+toexcl=res_hl[[1]]$contrast[which(!res_hl[[1]]$contrast%in%c("sample_typeR","sample_typeNR","sample_typeTF"))]
+
+res_hl <- res_hl %>% bind_rows(.id = 'sscell_group') %>% 
+  dplyr::filter(!contrast %in% toexcl) %>% 
+  select( -contrast)
+
+ci <- glme_res$ci
+names(ci) <- glme_res$sscell_group
+ci <- ci %>% bind_rows(.id = 'sscell_group') %>% 
+  dplyr::filter(!contrast %in% toexcl) %>% 
+  select( -contrast, -estimate)
+
+res_hl <- res_hl %>% 
+  full_join(ci) %>% 
+  arrange(adj.p.value) %>% 
+  mutate(highlevel_celltype = factor(sscell_group, levels = (res_hl$sscell_group)),
+         odds_ratio = exp(estimate),
+         ci_odds_low = exp(conf.low), 
+         ci_odds_high = exp(conf.high))
+         #prob = odds / (1 + odds)) 
+
+res_hl$sscell_group <- factor(res_hl$sscell_group, levels = rev(res_hl$sscell_group))
+```
+
+Estimated difference with confidence intervals, ordered by significance.
+
+```{r, fig.width=4, fig.height=5}
+ggplot(res_hl, aes(x = estimate, y = sscell_group)) +
+  geom_vline(xintercept = 0, color = 'gray', linetype = 'dashed') +
+  geom_point() +
+  geom_errorbarh(aes(xmax = conf.high, xmin = conf.low), height = .1) +
+  ggtitle('logOdds ratio')
+
+
+
+```
+
+Results table 
+
+```{r}
+res_hl %>% 
+  mutate(padj = format(adj.p.value, digits = 2)) %>% 
+  kable(digits = 2) %>% 
+  kableExtra::kable_styling(full_width = FALSE)
+
+```
+
+
+### Wilcoxon test
+
+```{r}
+
+wilk_res <- mymat_summary %>% 
+  dplyr::filter(cell_names %in% avail) %>% 
+  spread(key = 'sample_type', value = freq) %>% 
+  group_by(cell_names) %>% 
+  mutate(stat = wilcox.test(PD, R) %>% .$statistic,
+         p.value = wilcox.test(PD, R) %>% .$p.value) %>% 
+  ungroup()
+
+
+res_w <- wilk_res %>% 
+  select(cell_names, stat, p.value) %>% unique() %>% 
+  arrange(p.value) %>% 
+  mutate(padj = p.adjust(p.value, method = 'fdr')) %>% 
+  mutate(celltype = factor(cell_names, levels = (res$cell_names)))
+
+```
+
+Results table 
+
+```{r}
+res_w %>% 
+  mutate(p.value = format(p.value, digits = 2)) %>% 
+  mutate(padj = format(padj, digits = 2)) %>% 
+  kable(digits = 2) %>% 
+  kableExtra::kable_styling(full_width = FALSE)
+
+```
+
+### Comparison of raw p-values
+
+```{r, fig.width=4, fig.height=4}
+
+res %>% select(cell_names, adj.p.value, statistic) %>% 
+  full_join(res_w %>% select(cell_names, p.value, stat), by = 'cell_names') %>% 
+  ggplot(aes(x = adj.p.value, y = p.value)) + geom_point() +
+  xlab('glmer') + ylab('wilcoxon') #+
+```
+
